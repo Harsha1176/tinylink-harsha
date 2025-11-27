@@ -40,20 +40,86 @@ app.get("/healthz", (req, res) => {
 //     res.status(500).json({ error: "Server error" });
 //   }
 // });
-// Generate random short code
-function generateRandomCode(length = 6) {
-  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  let code = "";
-  for (let i = 0; i < length; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return code;
-}
 
-// Create link
+// Generate random short code
+// function generateRandomCode(length = 6) {
+//   const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+//   let code = "";
+//   for (let i = 0; i < length; i++) {
+//     code += chars.charAt(Math.floor(Math.random() * chars.length));
+//   }
+//   return code;
+// }
+
+// // Create link
+// app.post("/api/links", async (req, res) => {
+//   try {
+//     let { targetUrl, code } = req.body;
+
+//     // Validate URL
+//     try {
+//       new URL(targetUrl);
+//     } catch {
+//       return res.status(400).json({ error: "Invalid URL" });
+//     }
+
+//     // Prevent duplicate original URL
+//     const existingUrl = await pool.query(
+//       "SELECT code FROM links WHERE target_url=$1",
+//       [targetUrl]
+//     );
+
+//     if (existingUrl.rows.length > 0) {
+//       return res.json({
+//         success: true,
+//         code: existingUrl.rows[0].code,
+//         shortUrl: `${req.protocol}://${req.get("host")}/${existingUrl.rows[0].code}`,
+//         message: "URL already shortened, returning existing code"
+//       });
+//     }
+
+//     // If custom code given → ensure it's unique
+//     if (code) {
+//       const exists = await pool.query("SELECT * FROM links WHERE code=$1", [code]);
+//       if (exists.rows.length > 0) {
+//         return res.status(409).json({ error: "Custom code already exists" });
+//       }
+//     }
+
+//     // If no custom code → auto-generate code
+//     if (!code) {
+//       code = generateRandomCode(6);
+
+//       // ensure unique
+//       let exists = await pool.query("SELECT code FROM links WHERE code=$1", [code]);
+//       while (exists.rows.length > 0) {
+//         code = generateRandomCode(6);
+//         exists = await pool.query("SELECT code FROM links WHERE code=$1", [code]);
+//       }
+//     }
+
+//     // Insert link
+//     await pool.query(
+//       "INSERT INTO links (code, target_url) VALUES ($1, $2)",
+//       [code, targetUrl]
+//     );
+
+//     res.json({
+//       success: true,
+//       code,
+//       shortUrl: `${req.protocol}://${req.get("host")}/${code}`
+//     });
+
+//   } catch (err) {
+//     console.log(err);
+//     res.status(500).json({ error: "Server error" });
+//   }
+// });
+
+
 app.post("/api/links", async (req, res) => {
   try {
-    let { targetUrl, code } = req.body;
+    const { targetUrl, code: customCode } = req.body;
 
     // Validate URL
     try {
@@ -62,55 +128,61 @@ app.post("/api/links", async (req, res) => {
       return res.status(400).json({ error: "Invalid URL" });
     }
 
-    // Prevent duplicate original URL
-    const existingUrl = await pool.query(
-      "SELECT code FROM links WHERE target_url=$1",
+    // If URL already exists → return existing code
+    const existing = await pool.query(
+      "SELECT code FROM links WHERE target_url=$1 LIMIT 1",
       [targetUrl]
     );
-
-    if (existingUrl.rows.length > 0) {
+    if (existing.rows.length > 0) {
       return res.json({
         success: true,
-        code: existingUrl.rows[0].code,
-        shortUrl: `${req.protocol}://${req.get("host")}/${existingUrl.rows[0].code}`,
-        message: "URL already shortened, returning existing code"
+        code: existing.rows[0].code,
+        shortUrl: `${req.protocol}://${req.get("host")}/${existing.rows[0].code}`,
+        message: "Already shortened"
       });
     }
 
-    // If custom code given → ensure it's unique
-    if (code) {
-      const exists = await pool.query("SELECT * FROM links WHERE code=$1", [code]);
-      if (exists.rows.length > 0) {
-        return res.status(409).json({ error: "Custom code already exists" });
+    const MAX_RETRIES = 5;
+    let attempts = 0;
+    let finalCode = customCode || null;
+
+    while (attempts < MAX_RETRIES) {
+      // generate only if not custom
+      if (!finalCode) {
+        finalCode = generateRandomCode();
+      }
+
+      try {
+        await pool.query(
+          "INSERT INTO links (code, target_url) VALUES ($1, $2)",
+          [finalCode, targetUrl]
+        );
+
+        return res.json({
+          success: true,
+          code: finalCode,
+          shortUrl: `${req.protocol}://${req.get("host")}/${finalCode}`
+        });
+      } catch (err) {
+        if (err.code === "23505") {
+          // Custom code exists → return error
+          if (customCode) {
+            return res.status(409).json({ error: "Custom code already exists" });
+          }
+          // Random code collision: retry
+          finalCode = null;
+          attempts++;
+        } else {
+          console.error(err);
+          return res.status(500).json({ error: "Server error" });
+        }
       }
     }
 
-    // If no custom code → auto-generate code
-    if (!code) {
-      code = generateRandomCode(6);
-
-      // ensure unique
-      let exists = await pool.query("SELECT code FROM links WHERE code=$1", [code]);
-      while (exists.rows.length > 0) {
-        code = generateRandomCode(6);
-        exists = await pool.query("SELECT code FROM links WHERE code=$1", [code]);
-      }
-    }
-
-    // Insert link
-    await pool.query(
-      "INSERT INTO links (code, target_url) VALUES ($1, $2)",
-      [code, targetUrl]
-    );
-
-    res.json({
-      success: true,
-      code,
-      shortUrl: `${req.protocol}://${req.get("host")}/${code}`
-    });
+    return res.status(500).json({ error: "Failed to generate unique code" });
 
   } catch (err) {
-    console.log(err);
+    console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 });
